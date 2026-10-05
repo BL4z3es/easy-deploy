@@ -34,7 +34,13 @@
 #      copies in /etc. Reported, never applied: writing /etc needs root, and a
 #      sudoers line that allowed it would make a leaked CI key root.
 
-set -euo pipefail
+set -eEuo pipefail
+
+# set -e stops at the first unexpected failure; this says where. Failures
+# that are handled -- inside `if` and `||` -- never reach it, and neither does
+# main returning 1 on purpose: that one fires at the top level, outside any
+# function, where nothing else runs.
+trap '[[ -z "${FUNCNAME[0]:-}" ]] || warn "deploy.sh stopped unexpectedly at line $LINENO: $BASH_COMMAND"' ERR
 
 # The whole script is parsed before anything runs: step 2 replaces this file,
 # and bash would otherwise read the rest of it from the new version.

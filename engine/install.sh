@@ -47,6 +47,10 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!! \033[0m%s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx \033[0m%s\n' "$*" >&2; exit 1; }
 
+# set -e stops at the first unexpected failure; this says where, rather than
+# leaving a half-finished install that exited without a word.
+trap 'warn "install.sh stopped unexpectedly at line $LINENO: $BASH_COMMAND"' ERR
+
 # ---------------------------------------------------------------- config ----
 # The same defaults as deploy.sh's load_conf: keep the two in step (the tests
 # compare their --print-config output).
@@ -529,9 +533,14 @@ if (( CI_KEY )); then
 
     # The address this server sends from, which on a VPS is the one GitHub
     # reaches it on. Behind NAT it is not: pass --host.
-    HOST="${HOST_ARG:-$(ip -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([^ ]*\).*/\1/p')}"
+    HOST="$HOST_ARG"
+    [[ -n "$HOST" ]] || HOST="$(ip -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([^ ]*\).*/\1/p')" || true
     HOST="${HOST:-SERVER-ADDRESS}"
-    SSH_PORT="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }')"
+    # `sshd -T` is the truth, but fails where sshd has never started (no
+    # /run/sshd); the config files are the next best thing.
+    SSH_PORT="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }')" || true
+    [[ -n "$SSH_PORT" ]] || SSH_PORT="$(cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null \
+                                        | awk 'tolower($1) == "port" { print $2; exit }')" || true
     SSH_PORT="${SSH_PORT:-22}"
     HOST_SPEC="$HOST"
     [[ "$SSH_PORT" == 22 ]] || HOST_SPEC="[$HOST]:$SSH_PORT"

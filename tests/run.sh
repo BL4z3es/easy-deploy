@@ -14,7 +14,7 @@ ED="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 T="$(mktemp -d)"
 cleanup() {
     for pid in "$T"/run/*.pid; do [[ -f "$pid" ]] && kill "$(cat "$pid")" 2>/dev/null; done
-    rm -rf "$T"
+    [[ -s "$T/unexpected" ]] && grep "stopped unexpectedly" "$T/unexpected" | sort | uniq -c >&2; rm -rf "$T"
 }
 trap cleanup EXIT
 
@@ -43,6 +43,7 @@ OUT="" RC=0
 deploy() {  # [env...] -- run the deploy root's deploy.sh, keep its output and status
     OUT="$(env "$@" "$PREFIX/deploy/deploy.sh" 2>&1)"
     RC=$?
+    if grep -q "stopped unexpectedly" <<<"$OUT"; then printf '%s\n' "$OUT" >> "$T/unexpected"; fi
 }
 push() {  # message -- commit everything in the work tree and push it
     git -C "$WORK" add -A
@@ -223,6 +224,8 @@ OUT="$(cat "$T/hup.out")"
 check "a hangup mid-deploy does not stop it" bash -c '[[ $0 = 0 ]] && [[ $1 = v12 ]]' "$RC" "$(served)"
 check "  and the log on the server has all of it" grep -q "Deployed" "$PREFIX/.easy-deploy/deploy.log"
 rm "$WORK/slow-hook"; push "fast again"; deploy
+
+check "no deploy, failed or not, stopped unexpectedly (the ERR trap stays quiet)" test ! -s "$T/unexpected"
 
 # ---------------------------------------------------- python and installer ----
 
