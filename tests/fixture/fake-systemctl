@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#
+# A stand-in for systemctl where systemd is not running (a container): runs a
+# unit's ExecStart as its User=, from its WorkingDirectory=, in the background.
+# Enough of systemctl for install.sh and deploy.sh. tests/system.sh installs it
+# as /usr/local/sbin/systemctl only when /run/systemd/system is missing.
+
+set -euo pipefail
+
+units=/etc/systemd/system
+run=/run/fake-systemd
+cmd="${1:?}"
+shift
+[[ "${1:-}" == --quiet ]] && shift
+svc="${1:-}"
+svc="${svc%.service}"
+unit="$units/$svc.service"
+pidfile="$run/$svc.pid"
+
+# /proc rather than kill -0: the process is root's runuser, and a non-root
+# caller asking about it would get EPERM and read that as "dead".
+alive() { [[ -f "$pidfile" ]] && [[ -d "/proc/$(cat "$pidfile")" ]]; }
+field() { sed -n "s/^$1=//p" "$unit" | tail -1; }
+exec_start() {
+    awk '/^ExecStart=/ { f = 1; sub(/^ExecStart=/, "") }
+         f { if (sub(/\\$/, "")) printf "%s ", $0; else { print; exit } }' "$unit"
+}
+stop() {
+    if alive; then
+        kill -- "-$(cat "$pidfile")" 2>/dev/null || true
+        while alive; do sleep 0.1; done
+    fi
+}
+
+case "$cmd" in
+    daemon-reload|reload) ;;
+    enable)     mkdir -p "$run"; touch "$run/$svc.enabled" ;;
+    disable)    rm -f "$run/$svc.enabled" ;;
+    is-enabled) [[ -f "$run/$svc.enabled" ]] ;;
+    is-active)  alive ;;
+    cat)        cat "$unit" ;;
+    stop)       stop ;;
+    restart|start)
+        mkdir -p "$run"
+        stop
+        user="$(field User)" dir="$(field WorkingDirectory)" line="$(exec_start)"
+        cd "${dir:-/}"
+        setsid runuser -u "${user:-root}" -- bash -c "exec $line" > "$run/$svc.log" 2>&1 < /dev/null &
+        echo $! > "$pidfile"
+        ;;
+    *) echo "fake systemctl: $cmd is not supported" >&2; exit 1 ;;
+esac

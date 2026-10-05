@@ -1,0 +1,102 @@
+# The deploy step every project shares, as a reusable workflow. A project calls
+# it from its own workflow, after its own checks:
+#
+#   deploy:
+#     needs: check
+#     uses: BL4z3es/easy-deploy/.github/workflows/deploy.yml@v1
+#     secrets: inherit
+#
+# It opens one SSH session to the server, and that is all it does: the key
+# carries a forced command in authorized_keys, so the session runs the
+# project's deploy/deploy.sh and nothing else. Everything that decides whether
+# a commit stays live -- the health check, the rollback -- happens there, so a
+# deploy started by hand on the server behaves exactly like this one.
+
+name: easy-deploy
+
+on:
+  workflow_call:
+    inputs:
+      timeout-minutes:
+        description: >-
+          How long the SSH session may take. Raise it for a slow health check
+          (a long HEALTH_TRIES, an ExecStartPre that waits on something).
+        type: number
+        default: 10
+      ssh-port:
+        description: The port sshd listens on.
+        type: number
+        default: 22
+      concurrency-group:
+        description: >-
+          Deploys in one group run one at a time. Do not reuse this name for a
+          workflow-level concurrency group in the caller: GitHub cancels a job
+          whose group is held by its own workflow run as a deadlock.
+        type: string
+        default: easy-deploy
+    secrets:
+      VPS_SSH_KEY:
+        description: Private half of this project's CI key.
+        required: true
+      VPS_KNOWN_HOSTS:
+        description: The server's host keys, as known_hosts lines (install.sh --ci-key prints them).
+        required: true
+      VPS_HOST:
+        description: The server's address.
+        required: true
+      VPS_USER:
+        description: The account the key is authorized for (SERVICE_USER).
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy over SSH
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    # One deploy at a time. Overlapping runs would race on the reset and the
+    # restart. Queued rather than cancelled: a cancelled run can leave the
+    # checkout moved and the service never restarted -- the one state that
+    # looks deployed and is not. (deploy.sh also takes a lock on the server,
+    # and finishes such a deploy on its next run.)
+    concurrency:
+      group: ${{ inputs.concurrency-group }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Deploy
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          SSH_PORT: ${{ inputs.ssh-port }}
+        run: |
+          for name in SSH_KEY KNOWN_HOSTS VPS_HOST VPS_USER; do
+            if [ -z "${!name}" ]; then
+              echo "::error title=Not deployed::A VPS_* secret is empty in this repository. On the server: sudo deploy/install.sh --ci-key"
+              exit 1
+            fi
+          done
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY"     > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519
+
+          # StrictHostKeyChecking stays on and the host key is pinned from a
+          # secret. Accepting an unknown key here would make the deploy trust
+          # whatever answers on that address.
+          #
+          # The argument below is discarded: the key's forced command runs
+          # deploy/deploy.sh whatever the client asks for. Sending `deploy` is
+          # only so the log says what was asked for. ServerAliveInterval keeps
+          # a long health check from looking like a dead connection.
+          ssh -i ~/.ssh/id_ed25519 \
+              -p "$SSH_PORT" \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              -o ConnectTimeout=15 \
+              -o ServerAliveInterval=30 \
+              "$VPS_USER@$VPS_HOST" deploy

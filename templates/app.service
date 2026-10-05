@@ -1,0 +1,50 @@
+# @NAME@ -- installed by deploy/install.sh as /etc/systemd/system/@NAME@.service.
+#
+# deploy.sh never writes this file into /etc: it compares the two after every
+# deploy and reports when they differ. Edit it here, push, then re-run
+#     sudo @PREFIX@/deploy/install.sh
+#
+# Bound to the loopback on purpose: nothing but the reverse proxy should reach
+# the application, whatever the firewall happens to allow on the public
+# interface.
+
+[Unit]
+Description=@NAME@
+After=network.target
+Before=caddy.service
+
+[Service]
+Type=exec
+User=@USER@
+WorkingDirectory=@PREFIX@
+@ENVIRONMENT@
+# Secrets live here, readable by @USER@ only, never in the repository. The
+# dash means a missing file is not an error, so a host that has none still
+# boots. Point ENV_FILE in deploy/easy-deploy.conf at the same file if the
+# deploy hooks need them too.
+EnvironmentFile=-/etc/@NAME@/@NAME@.env
+
+# CHECK THIS LINE: it is a starting point, not a guess about your entry point.
+ExecStart=@EXECSTART@
+
+Restart=on-failure
+RestartSec=5s
+
+# The whole filesystem is read-only to this process except WRITABLE_DIRS:
+# a bug in the application cannot rewrite the code that serves it. The dash
+# lets the unit start before install.sh has created the directory.
+ReadWritePaths=-@PREFIX@/data
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

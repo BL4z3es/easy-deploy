@@ -1,0 +1,24 @@
+# @NAME@, at @SITE@.
+#
+# A *fragment*, not a Caddyfile. install.sh puts it at
+# /etc/caddy/conf.d/@NAME@.caddy, where the `import /etc/caddy/conf.d/*.caddy`
+# line at the end of /etc/caddy/Caddyfile picks it up. On a shared box that
+# Caddyfile is another site's production config: a whole Caddyfile here would
+# take that site down to bring this one up.
+#
+# Needs a DNS record for @SITE@ pointing at this server, with any CDN proxy
+# off, so the ACME challenge reaches Caddy.
+
+@SITE@ {
+	# Compresses every text/* response, which includes text/event-stream. If
+	# the application streams Server-Sent Events, handle that path on its own
+	# with `flush_interval -1` and no `encode`: a compressor holding a response
+	# that never ends holds every event with it.
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:@PORT@
+
+	log {
+		output file /var/log/caddy/@NAME@-access.log
+	}
+}
