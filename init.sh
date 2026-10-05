@@ -34,7 +34,7 @@ set -euo pipefail
 shopt -u patsub_replacement 2>/dev/null || true
 
 UPSTREAM=https://github.com/BL4z3es/easy-deploy
-ED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P || true)"
+ED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P)" || ED_DIR=""
 
 # Run from a pipe or a process substitution, there is no checkout next to this
 # script to copy the engine from: fetch one and hand over to its init.sh.

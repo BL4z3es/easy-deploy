@@ -50,7 +50,7 @@ push() {  # message -- commit everything in the work tree and push it
     git -C "$WORK" -c push.negotiate=false push --quiet origin main
 }
 served()   { curl -s --max-time 3 "http://127.0.0.1:$PORT/"; }
-sha()      { git -C "$WORK" rev-parse "${1:-HEAD}"; }
+sha()      { git -C "$WORK" rev-parse HEAD; }
 deployed() { cat "$PREFIX/.easy-deploy/deployed"; }
 has()      { grep -qF -- "$1" <<<"$OUT"; }
 lacks()    { ! grep -qF -- "$1" <<<"$OUT"; }

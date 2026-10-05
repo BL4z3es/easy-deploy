@@ -71,7 +71,7 @@ check() { local what="$1"; shift; if "$@"; then ok "$what"; else bad "$what"; fi
 # locked, or sshd refuses it even a key login.
 useradd -m -s /bin/bash "$SVC_USER"
 usermod -p '*' "$SVC_USER"
-as() { runuser -u "$SVC_USER" -- env HOME="/home/$SVC_USER" "$@"; }
+as() { runuser -u "$SVC_USER" -- env -u XDG_CONFIG_HOME HOME="/home/$SVC_USER" "$@"; }
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
 
 # origin, and the editable checkout install.sh runs from -- both the service
@@ -83,6 +83,9 @@ as git -C "$T/work" remote add origin "$T/origin.git"
 install -o "$SVC_USER" -m 0644 "$ED/tests/fixture/app.py" "$T/work/app.py"
 as bash -c "echo v1 > '$T/work/version.txt'; : > '$T/work/requirements.txt'"
 push() { as git -C "$T/work" add -A && as git -C "$T/work" commit --quiet -m "$1" && as git -C "$T/work" push --quiet origin main; }
+
+# Host keys before install.sh, which prints them: a fresh image may have none yet.
+[[ -f /etc/ssh/ssh_host_ed25519_key ]] || ssh-keygen -A >/dev/null
 
 printf '\n\033[1minit.sh, install.sh\033[0m\n'
 
@@ -121,7 +124,6 @@ check "  and leaves one CI key, not two" test "$(grep -c "$NAME-github-actions" 
 
 # The runner's side: its own sshd, the printed host keys, the printed key.
 mkdir -p /run/sshd
-[[ -f /etc/ssh/ssh_host_ed25519_key ]] || ssh-keygen -A >/dev/null
 cat > "$T/sshd_config" <<EOF
 Port $SSH_PORT
 ListenAddress 127.0.0.1
@@ -132,8 +134,10 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 EOF
 /usr/sbin/sshd -f "$T/sshd_config"
-grep -oE '127\.0\.0\.1 ssh-ed25519 [A-Za-z0-9+/=]+' <<<"$OUT" | head -1 \
-    | sed "s/^127\.0\.0\.1 /[127.0.0.1]:$SSH_PORT /" > "$T/known_hosts"
+# Printed as "127.0.0.1 KEY", or "[127.0.0.1]:PORT KEY" where sshd is not on 22;
+# this sshd is on a port of its own either way.
+grep -oE '(127\.0\.0\.1|\[127\.0\.0\.1\]:[0-9]+) ssh-ed25519 [A-Za-z0-9+/=]+' <<<"$OUT" | head -1 \
+    | sed -E "s/^[^ ]+ /[127.0.0.1]:$SSH_PORT /" > "$T/known_hosts"
 install -m 0600 "/home/$SVC_USER/$NAME-ci-key" "$T/key"
 check "the printed host key is this server's own" grep -qF "$(cut -d' ' -f2 /etc/ssh/ssh_host_ed25519_key.pub)" "$T/known_hosts"
 runner() {  # the exact ssh the reusable workflow runs; $1 is the command the client asks for

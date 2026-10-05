@@ -114,7 +114,7 @@ print_config() {
 
 # runuser keeps root's HOME, and git's credentials, pip's cache and npm's
 # cache all belong in the service user's.
-asuser() { runuser -u "$SERVICE_USER" -- env HOME="$SERVICE_HOME" PATH="$PATH" "$@"; }
+asuser() { runuser -u "$SERVICE_USER" -- env -u XDG_CONFIG_HOME HOME="$SERVICE_HOME" PATH="$PATH" "$@"; }
 
 # A hook from easy-deploy.conf, in a bash of its own with errexit on -- the
 # same way deploy.sh runs them. $1 is the hook, $2 "user" to run it as
@@ -123,7 +123,7 @@ run_hook() {
     declare -F "$1" >/dev/null || return 0
     log "$1"
     local runner=()
-    [[ "${2:-}" == user ]] && runner=(runuser -u "$SERVICE_USER" -- env HOME="$SERVICE_HOME" PATH="$PATH")
+    [[ "${2:-}" == user ]] && runner=(runuser -u "$SERVICE_USER" -- env -u XDG_CONFIG_HOME HOME="$SERVICE_HOME" PATH="$PATH")
     # shellcheck disable=SC2016  # expanded by the hook's bash
     (cd "$PREFIX" && "${runner[@]}" bash -c 'set -euo pipefail; . "$1"; "$2"' easy-deploy-hook "$CONF" "$1")
 }
@@ -548,6 +548,7 @@ if (( CI_KEY )); then
     KNOWN_HOSTS="$(for pub in /etc/ssh/ssh_host_*_key.pub; do
         [[ -f "$pub" ]] && printf '%s %s\n' "$HOST_SPEC" "$(cut -d' ' -f1,2 "$pub")"
     done; true)"
+    [[ -n "$KNOWN_HOSTS" ]] || warn "No host keys in /etc/ssh: is openssh-server installed? (ssh-keygen -A makes them.)"
     echo "    VPS_KNOWN_HOSTS  these lines, read from this server's own host keys:"
     # shellcheck disable=SC2001
     sed 's/^/                       /' <<<"$KNOWN_HOSTS"
