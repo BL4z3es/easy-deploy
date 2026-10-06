@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Lint and end-to-end tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # The oldest Python a server is likely to have, so installer.py stays
+          # runnable there.
+          python-version: '3.10'
+
+      # Pinned: shellcheck adds checks between releases, and the runner's own
+      # is whatever the image ships.
+      - name: The scripts parse and pass shellcheck
+        run: |
+          pip install --quiet shellcheck-py==0.11.0.1
+          for f in init.sh engine/*.sh tests/*.sh tests/fixture/systemctl tests/fixture/fake-systemctl; do bash -n "$f"; done
+          shellcheck -x init.sh engine/deploy.sh engine/install.sh tests/run.sh tests/system.sh tests/fixture/systemctl tests/fixture/fake-systemctl
+
+      - name: installer.py compiles
+        run: python -m py_compile engine/installer.py
+
+      - name: Workflows pass actionlint
+        run: |
+          pip install --quiet actionlint-py
+          actionlint .github/workflows/*.yml
+
+      # deploy.sh runs the system python3 (a forced command's PATH), which
+      # needs venv to build env/.
+      - name: python3-venv
+        run: /usr/bin/python3 -c 'import ensurepip' 2>/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q python3-venv; }
+
+      - name: tests/run.sh
+        run: tests/run.sh
+
+  # install.sh needs root, systemd and an SSH server, so it is tested where it
+  # can be thrown away: a runner, with a real systemd and a real sshd.
+  system:
+    name: install.sh, then deploys over SSH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: OpenSSH server, python3-venv
+        run: |
+          missing=()
+          [ -x /usr/sbin/sshd ] || missing+=(openssh-server)
+          /usr/bin/python3 -c 'import ensurepip' 2>/dev/null || missing+=(python3-venv)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            sudo apt-get update -q && sudo apt-get install -y -q "${missing[@]}"
+          fi
+
+      - name: tests/system.sh
+        run: sudo EASY_DEPLOY_SYSTEM_TEST=1 tests/system.sh

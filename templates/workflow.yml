@@ -1,0 +1,30 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [@BRANCH@]
+  workflow_dispatch:
+
+jobs:
+  # The gate. The alternative to catching a mistake here is catching it in
+  # deploy.sh's health check on the server, and that costs a failed start and a
+  # rollback. Add this project's own tests and linters to it.
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+@CHECK_STEPS@
+  # One SSH session to the server; the forced command on the key runs
+  # deploy/deploy.sh there, which deploys origin/@BRANCH@ and rolls back if it
+  # does not come up. Secrets: VPS_SSH_KEY, VPS_KNOWN_HOSTS, VPS_HOST, VPS_USER
+  # (sudo deploy/install.sh --ci-key prints all four).
+  deploy:
+    needs: check
+    uses: @WORKFLOW_REPO@/.github/workflows/deploy.yml@@WORKFLOW_REF@
+    secrets: inherit
+    # with:
+    #   timeout-minutes: 10   # raise it if HEALTH_TRIES is long
+    #   ssh-port: 22
