@@ -25,9 +25,11 @@
 #      the after_restart hook, then the same health check a deploy uses
 #   6. one sudoers line per unit: SERVICE_USER may `systemctl restart` it, and
 #      nothing else
-#   7. deploy/NAME.caddy into /etc/caddy/conf.d, with the whole Caddy config
+#   7. mesh: /etc/mesh/projects.d/NAME.toml, so CI on the tailnet can run this
+#      deploy with `mesh deploy NAME` (MESH_REGISTER: auto, yes or no)
+#   8. deploy/NAME.caddy into /etc/caddy/conf.d, with the whole Caddy config
 #      validated first and the previous one put back if it does not validate
-#   8. the CI key's forced-command line in SERVICE_USER's authorized_keys
+#   9. the CI key's forced-command line in SERVICE_USER's authorized_keys
 #
 # It never edits /etc/caddy/Caddyfile beyond appending the conf.d import when
 # that line is missing (with a backup), and never touches data in the deploy
@@ -63,6 +65,7 @@ load_conf() {
     HEALTH_URLS="" HEALTH_HOST="" HEALTH_STATUS=200 HEALTH_TRIES=15
     LOCK_WAIT=300 SYSTEMCTL="sudo -n systemctl"
     UNIT_DIR=/etc/systemd/system CADDY_DIR=/etc/caddy/conf.d CADDY_MAIN=/etc/caddy/Caddyfile
+    MESH_REGISTER=auto MESH_TIMEOUT_S=1800 MESH_DIR="${MESH_DIR:-/etc/mesh}"
     unset -f before_restart after_restart health_check install_deps on_install
 
     if ! bash -n "$CONF"; then
@@ -95,6 +98,13 @@ load_conf() {
     for n in HEALTH_TRIES HEALTH_STATUS LOCK_WAIT; do
         [[ "${!n}" =~ ^[0-9]+$ ]] || { warn "$n in $CONF must be a number (it is '${!n}')."; return 1; }
     done
+    case "$MESH_REGISTER" in
+        auto|yes|no) ;;
+        *) warn "MESH_REGISTER in $CONF must be auto, yes or no (it is '$MESH_REGISTER')."; return 1 ;;
+    esac
+    if ! [[ "$MESH_TIMEOUT_S" =~ ^[0-9]+$ ]] || (( MESH_TIMEOUT_S < 10 || MESH_TIMEOUT_S > 21600 )); then
+        warn "MESH_TIMEOUT_S in $CONF must be a number from 10 to 21600 (it is '$MESH_TIMEOUT_S')."; return 1
+    fi
     PATH="${EXTRA_PATH:+$EXTRA_PATH:}$BASE_PATH"
     read -r -a SYSTEMCTL_CMD <<<"$SYSTEMCTL"
     VENV="$PREFIX/env"
@@ -105,7 +115,8 @@ print_config() {
     local key hook
     for key in NAME SERVICE_USER PREFIX BRANCH STATE_DIR STACK DEPS_FILES PYTHON PY_CHECK \
                SERVICES OPTIONAL_SERVICES PORT SITE WRITABLE_DIRS ENV_FILE EXTRA_PATH HEALTH_URLS HEALTH_HOST \
-               HEALTH_STATUS HEALTH_TRIES LOCK_WAIT SYSTEMCTL UNIT_DIR CADDY_DIR CADDY_MAIN; do
+               HEALTH_STATUS HEALTH_TRIES LOCK_WAIT SYSTEMCTL UNIT_DIR CADDY_DIR CADDY_MAIN \
+               MESH_REGISTER MESH_TIMEOUT_S MESH_DIR; do
         printf '%s=%q\n' "$key" "${!key}"
     done
     for hook in before_restart after_restart health_check install_deps on_install; do
@@ -418,6 +429,52 @@ done > "$TMP_SUDOERS"
 visudo -cqf "$TMP_SUDOERS" || die "The sudoers lines did not pass visudo; nothing was installed."
 log "Installing $SUDOERS"
 install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS"
+
+# ------------------------------------------------------------------ mesh ----
+# Optional: tell meshd on this node that this project is deployable here, so a
+# `mesh deploy NAME` from CI (over the tailnet, no SSH) runs deploy.sh as
+# SERVICE_USER. meshd refuses a *.d file that is not root-owned or is group/
+# other-writable, hence root:root 0644, written whole (tmp + mv).
+
+register_mesh() {
+    local dir="$MESH_DIR/projects.d" file tmp what value
+    [[ "$NAME" =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] \
+        || { warn "NAME '$NAME' is not a valid mesh project name (lowercase letters, digits, . _ -; at most 63 characters). Set MESH_REGISTER=no, or rename the project."; return 1; }
+    for what in SERVICE_USER PREFIX; do
+        value="${!what}"
+        if [[ "$value" == *[\"\\]* || "$value" =~ [[:cntrl:]] ]]; then
+            warn "$what contains a quote, backslash or control character, which cannot go into a mesh project file. Set MESH_REGISTER=no."
+            return 1
+        fi
+    done
+    file="$dir/$NAME.toml"
+    install -d -m 0755 -o root -g root "$dir"
+    tmp="$(mktemp "$dir/.$NAME.toml.XXXXXX")"
+    CLEANUP+=("$tmp")
+    cat > "$tmp" <<EOF
+# Written by easy-deploy's install.sh. CI on the tailnet may run this project's
+# deploy with:  mesh deploy $NAME
+name = "$NAME"
+run_as = "$SERVICE_USER"
+command = ["$PREFIX/deploy/deploy.sh"]
+cwd = "$PREFIX"
+timeout_s = $MESH_TIMEOUT_S
+EOF
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$file"
+    log "Registered with mesh: $file (mesh deploy $NAME runs $PREFIX/deploy/deploy.sh as $SERVICE_USER)"
+}
+
+case "$MESH_REGISTER" in
+    no) ;;
+    yes)
+        [[ -d "$MESH_DIR" ]] || die "MESH_REGISTER=yes, but $MESH_DIR does not exist: is meshd installed on this node?"
+        register_mesh || die "Not registered with mesh (MESH_REGISTER=yes)." ;;
+    auto)
+        # A project that cannot be registered is skipped, not fatal: it deployed fine before mesh.
+        if [[ -d "$MESH_DIR" ]]; then register_mesh || warn "Skipped mesh registration."; fi ;;
+esac
 
 # ----------------------------------------------------------------- caddy ----
 # A fragment, never a whole Caddyfile: the Caddyfile on a shared box is

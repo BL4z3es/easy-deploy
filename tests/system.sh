@@ -43,6 +43,8 @@ for var in PIP_CERT REQUESTS_CA_BUNDLE SSL_CERT_FILE PIP_CONFIG_FILE; do
 done
 free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
 PORT="$(free_port)" SSH_PORT="$(free_port)"
+# install.sh must never write the real /etc/mesh from here; the mesh checks below point it at a scratch dir.
+export MESH_DIR="$T/no-mesh"
 
 FAKE=0
 if [[ ! -d /run/systemd/system ]]; then
@@ -146,6 +148,31 @@ runner() {  # the exact ssh the reusable workflow runs; $1 is the command the cl
                "$SVC_USER@127.0.0.1" "$1" 2>&1)"
     RC=$?
 }
+
+# mesh registration: meshd's config dir is a scratch one here, never /etc/mesh.
+printf '\n\033[1mmesh registration\033[0m\n'
+MESH_T="$T/mesh"
+mkdir -p "$MESH_T"
+OUT="$(MESH_DIR="$MESH_T" "$PREFIX/deploy/install.sh" 2>&1)"; RC=$?
+check "install.sh with MESH_REGISTER=auto and a mesh dir succeeds" test "$RC" = 0
+check "  writes projects.d/NAME.toml" test -f "$MESH_T/projects.d/$NAME.toml"
+check "  root-owned, mode 644" bash -c '[[ $(stat -c "%U:%a" "$0") = root:644 ]]' "$MESH_T/projects.d/$NAME.toml"
+check "  with the project's name, user, command and cwd" bash -c '
+    f=$1; grep -qx "name = \"$2\"" "$f" && grep -qx "run_as = \"$3\"" "$f" &&
+    grep -qx "command = \[\"$4/deploy/deploy.sh\"\]" "$f" && grep -qx "cwd = \"$4\"" "$f" &&
+    grep -qx "timeout_s = 1800" "$f"' _ "$MESH_T/projects.d/$NAME.toml" "$NAME" "$SVC_USER" "$PREFIX"
+rm -rf "$MESH_T/projects.d"
+echo "MESH_REGISTER=no" >> "$PREFIX/deploy/easy-deploy.conf"
+OUT="$(MESH_DIR="$MESH_T" "$PREFIX/deploy/install.sh" 2>&1)"; RC=$?
+check "MESH_REGISTER=no writes nothing" bash -c '[[ $0 = 0 ]] && [[ ! -e $1/projects.d ]]' "$RC" "$MESH_T"
+sed -i "/^MESH_REGISTER=/d" "$PREFIX/deploy/easy-deploy.conf"
+rm -rf "$MESH_T"
+OUT="$(MESH_DIR="$MESH_T" "$PREFIX/deploy/install.sh" 2>&1)"; RC=$?
+check "MESH_REGISTER=auto without a mesh dir skips it" bash -c '[[ $0 = 0 ]] && [[ ! -e $1 ]]' "$RC" "$MESH_T"
+echo "MESH_REGISTER=yes" >> "$PREFIX/deploy/easy-deploy.conf"
+OUT="$(MESH_DIR="$MESH_T" "$PREFIX/deploy/install.sh" 2>&1)"; RC=$?
+check "MESH_REGISTER=yes without a mesh dir fails loudly" bash -c '[[ $0 != 0 ]] && grep -q "does not exist" <<<"$1"' "$RC" "$OUT"
+sed -i "/^MESH_REGISTER=/d" "$PREFIX/deploy/easy-deploy.conf"
 
 printf '\n\033[1mdeploys through the forced command\033[0m\n'
 

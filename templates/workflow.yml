@@ -28,3 +28,9 @@ jobs:
     # with:
     #   timeout-minutes: 10   # raise it if HEALTH_TRIES is long
     #   ssh-port: 22
+    #
+    # Or over the tailnet, through mesh, with no SSH key (see the README,
+    # "Deploying over the tailnet"). Secrets: TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET.
+    # with:
+    #   transport: mesh
+    #   project: @NAME@

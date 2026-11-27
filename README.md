@@ -56,6 +56,42 @@ key, and prints the four secrets to set on the repository:
 
 From then on every push to the branch deploys.
 
+## Deploying over the tailnet (mesh)
+
+SSH needs a key per project and a server CI can reach. For nodes behind NAT (a
+home Pi), many nodes, or no keys at all, CI can deploy over Tailscale through
+[mesh](https://github.com/BL4z3es/mesh) instead: the runner joins the tailnet
+as `tag:ci`, and `mesh deploy NAME` runs `deploy/deploy.sh` on every node
+tagged `tag:mesh` that hosts the project, as `SERVICE_USER`. It is the same
+script as over SSH, so the health check and rollback are the same. SSH stays
+the default.
+
+1. In Tailscale, create an OAuth client allowed to mint `tag:ci` auth keys, and
+   an ACL that lets `tag:ci` reach `tag:mesh` on tcp 7420 (meshd's port).
+2. Set two repository secrets: `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET`. The
+   four `VPS_*` secrets are not needed.
+3. In the project's workflow:
+
+   ```yaml
+   deploy:
+     needs: check
+     uses: BL4z3es/easy-deploy/.github/workflows/deploy.yml@v1
+     secrets: inherit
+     with:
+       transport: mesh
+       project: NAME        # NAME in easy-deploy.conf
+   ```
+
+   `mesh-tag`, `ci-tag` and `mesh-spec` (where the `mesh` CLI is installed
+   from) can be overridden there too.
+
+Running `sudo deploy/install.sh` on a node that has meshd installed writes
+`/etc/mesh/projects.d/NAME.toml` (root-owned, `0644`), so the node is part of
+the next push's deploy with no CI change; a node without meshd is skipped.
+`MESH_REGISTER` controls it: `auto` (the default) registers only if `/etc/mesh`
+exists, `yes` fails when it does not, `no` never registers. `MESH_TIMEOUT_S`
+sets the deploy's time limit there.
+
 ## What a push does
 
 `.github/workflows/deploy.yml` runs the project's checks, then calls the
@@ -163,6 +199,8 @@ Plain bash, sourced: assignments and hook functions only.
 | `EXTRA_PATH` | | prepended to the bare `PATH` a forced command gets |
 | `STATE_DIR` | `PREFIX/.easy-deploy` | deploy log, lock, what's deployed |
 | `LOCK_WAIT` | `300` | seconds to wait for another deploy |
+| `MESH_REGISTER` | `auto` | `install.sh` registers the project with meshd: `auto` if `/etc/mesh` exists, `yes` (fails if not), `no` |
+| `MESH_TIMEOUT_S` | `1800` | the longest a mesh-run deploy may take, 10-21600 |
 
 `NAME`, `PREFIX`, `BRANCH`, `SERVICE_USER` and `STATE_DIR` are read once, from
 the checkout already on the server. Changing one is an install, not a deploy.

@@ -204,6 +204,26 @@ grep -v import "$T/etc/caddy/Caddyfile" > "$T/caddy.tmp"; mv "$T/caddy.tmp" "$T/
 deploy
 check "a Caddyfile that lost the conf.d import is reported" has "no longer imports"
 
+# mesh deploy: no arguments, no SSH_ORIGINAL_COMMAND, MESH_DEPLOY=1 in the env.
+echo v10b > "$WORK/version.txt"; push "v10b"
+deploy MESH_DEPLOY=1 "MESH_DEPLOY_SHA=$(sha)"
+check "a mesh deploy (MESH_DEPLOY=1, no arguments) deploys like the forced command" \
+    bash -c '[[ $0 = 0 ]] && [[ $1 = v10b ]]' "$RC" "$(served)"
+check "  with no warning when the sha it was sent is the one deployed" lacks "CI asked for"
+echo v10c > "$WORK/version.txt"; push "v10c"
+deploy MESH_DEPLOY=1 "MESH_DEPLOY_SHA=$(git -C "$WORK" rev-parse HEAD~1)"
+check "  a sha that origin has moved past only warns" \
+    bash -c '[[ $0 = 0 ]] && [[ $1 = v10c ]] && grep -q "CI asked for" <<<"$2"' "$RC" "$(served)" "$OUT"
+touch "$WORK/broken"; echo v10d > "$WORK/version.txt"; push "v10d: does not start"
+deploy MESH_DEPLOY=1
+check "  a failure under mesh rolls back, fails, and emits ::error" \
+    bash -c '[[ $0 = 1 ]] && [[ $1 = v10c ]] && grep -q "::error title=Deploy rolled back::" <<<"$2"' "$RC" "$(served)" "$OUT"
+deploy
+check "  and without MESH_DEPLOY there is no annotation" lacks "::error"
+rm "$WORK/broken"; echo v10e > "$WORK/version.txt"; push "v10e"
+deploy
+check "  the next good commit deploys" bash -c '[[ $0 = 0 ]] && [[ $1 = v10e ]]' "$RC" "$(served)"
+
 # One deploy at a time.
 echo v11 > "$WORK/version.txt"; push "v11"
 flock "$PREFIX/.easy-deploy/lock" sleep 4 &

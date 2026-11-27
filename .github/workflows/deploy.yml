@@ -6,11 +6,14 @@
 #     uses: BL4z3es/easy-deploy/.github/workflows/deploy.yml@v1
 #     secrets: inherit
 #
-# It opens one SSH session to the server, and that is all it does: the key
-# carries a forced command in authorized_keys, so the session runs the
-# project's deploy/deploy.sh and nothing else. Everything that decides whether
-# a commit stays live -- the health check, the rollback -- happens there, so a
-# deploy started by hand on the server behaves exactly like this one.
+# By default it opens one SSH session to the server, and that is all it does:
+# the key carries a forced command in authorized_keys, so the session runs the
+# project's deploy/deploy.sh and nothing else. With `transport: mesh` it joins
+# the tailnet instead and runs `mesh deploy`, which has every node that hosts
+# the project run the same deploy/deploy.sh. Either way, everything that
+# decides whether a commit stays live -- the health check, the rollback --
+# happens there, so a deploy started by hand on the server behaves exactly
+# like this one.
 
 name: easy-deploy
 
@@ -19,12 +22,13 @@ on:
     inputs:
       timeout-minutes:
         description: >-
-          How long the SSH session may take. Raise it for a slow health check
-          (a long HEALTH_TRIES, an ExecStartPre that waits on something).
+          How long the SSH session (or the mesh deploy) may take. Raise it for
+          a slow health check (a long HEALTH_TRIES, an ExecStartPre that waits
+          on something).
         type: number
         default: 10
       ssh-port:
-        description: The port sshd listens on.
+        description: The port sshd listens on (transport ssh).
         type: number
         default: 22
       concurrency-group:
@@ -34,23 +38,51 @@ on:
           whose group is held by its own workflow run as a deadlock.
         type: string
         default: easy-deploy
+      transport:
+        description: >-
+          How CI reaches the server: "ssh" (the default) or "mesh", over the
+          tailnet through the mesh platform.
+        type: string
+        default: ssh
+      project:
+        description: The mesh project name (NAME in easy-deploy.conf). Required for transport mesh.
+        type: string
+        default: ""
+      mesh-tag:
+        description: The tag of the nodes mesh deploys to.
+        type: string
+        default: tag:mesh
+      ci-tag:
+        description: The tag this runner joins the tailnet with.
+        type: string
+        default: tag:ci
+      mesh-spec:
+        description: The pip spec the mesh CLI is installed from.
+        type: string
+        default: git+https://github.com/BL4z3es/mesh@main
     secrets:
       VPS_SSH_KEY:
-        description: Private half of this project's CI key.
-        required: true
+        description: Private half of this project's CI key (transport ssh).
+        required: false
       VPS_KNOWN_HOSTS:
         description: The server's host keys, as known_hosts lines (install.sh --ci-key prints them).
-        required: true
+        required: false
       VPS_HOST:
-        description: The server's address.
-        required: true
+        description: The server's address (transport ssh).
+        required: false
       VPS_USER:
-        description: The account the key is authorized for (SERVICE_USER).
-        required: true
+        description: The account the key is authorized for, SERVICE_USER (transport ssh).
+        required: false
+      TS_OAUTH_CLIENT_ID:
+        description: Tailscale OAuth client id, allowed to create auth keys with the CI tag (transport mesh).
+        required: false
+      TS_OAUTH_SECRET:
+        description: Tailscale OAuth client secret (transport mesh).
+        required: false
 
 jobs:
   deploy:
-    name: Deploy over SSH
+    name: Deploy over ${{ inputs.transport == 'mesh' && 'the tailnet' || 'SSH' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
@@ -64,7 +96,25 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - name: Check the transport
+        env:
+          TRANSPORT: ${{ inputs.transport }}
+          PROJECT: ${{ inputs.project }}
+        run: |
+          case "$TRANSPORT" in
+            ssh) ;;
+            mesh)
+              if [ -z "$PROJECT" ]; then
+                echo "::error title=Not deployed::transport: mesh needs the project input (NAME in deploy/easy-deploy.conf)."
+                exit 1
+              fi ;;
+            *)
+              echo "::error title=Not deployed::transport must be ssh or mesh."
+              exit 1 ;;
+          esac
+
       - name: Deploy
+        if: inputs.transport == 'ssh'
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
@@ -100,3 +150,45 @@ jobs:
               -o ConnectTimeout=15 \
               -o ServerAliveInterval=30 \
               "$VPS_USER@$VPS_HOST" deploy
+
+      - name: Check the Tailscale secrets
+        if: inputs.transport == 'mesh'
+        env:
+          TS_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          if [ -z "$TS_ID" ] || [ -z "$TS_SECRET" ]; then
+            echo "::error title=Not deployed::TS_OAUTH_CLIENT_ID or TS_OAUTH_SECRET is empty in this repository."
+            exit 1
+          fi
+
+      - name: Join the tailnet
+        if: inputs.transport == 'mesh'
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ inputs.ci-tag }}
+
+      - uses: actions/setup-python@v5
+        if: inputs.transport == 'mesh'
+        with:
+          python-version: '3.12'
+
+      - name: Install the mesh CLI
+        if: inputs.transport == 'mesh'
+        env:
+          MESH_SPEC: ${{ inputs.mesh-spec }}
+        run: pip install --quiet "$MESH_SPEC"
+
+      # Every node tagged MESH_TAG that hosts PROJECT runs deploy/deploy.sh as
+      # its SERVICE_USER and streams the log here; any node that fails fails
+      # this step. Lines starting with :: reach the run as annotations.
+      - name: Deploy
+        if: inputs.transport == 'mesh'
+        env:
+          PROJECT: ${{ inputs.project }}
+          MESH_TAG: ${{ inputs.mesh-tag }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+        run: |
+          mesh deploy "$PROJECT" --sha "$GITHUB_SHA" --tag "$MESH_TAG" --timeout "$((TIMEOUT_MINUTES * 60))"

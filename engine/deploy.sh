@@ -17,6 +17,9 @@
 # discarded. A leaked key buys a deploy and nothing else. Running it by hand,
 # as SERVICE_USER, does the same thing.
 #
+# Or run by meshd, as SERVICE_USER, for `mesh deploy NAME` from CI over the
+# tailnet (MESH_DEPLOY=1; install.sh registers the project). Same thing again.
+#
 # The sequence:
 #   1. fetch origin/$BRANCH. Nothing to do when the checkout is already there
 #      and the last deploy of it finished.
@@ -146,6 +149,11 @@ if ! git fetch --quiet origin "$BRANCH" 9>&-; then
     return 1
 fi
 TARGET="$(git rev-parse "origin/$BRANCH")"
+# `mesh deploy --sha` says which commit CI built. Origin may have moved on
+# since, and deploy.sh deploys origin's tip either way: say so, don't fail.
+if [[ "${MESH_DEPLOY_SHA:-}" =~ ^[0-9a-f]{40}$ && "$MESH_DEPLOY_SHA" != "$TARGET" ]]; then
+    warn "CI asked for ${MESH_DEPLOY_SHA:0:8}, but origin/$BRANCH is at ${TARGET:0:8}; deploying ${TARGET:0:8}."
+fi
 
 if [[ "$DEPLOYED" == "$TARGET" && "$head" == "$TARGET" ]]; then
     log "Already at ${TARGET:0:8} -- nothing to do"
@@ -200,9 +208,10 @@ log()  { printf '\n\033[1m==> %s\033[0m\n' "$*" || true; }
 warn() { printf '\033[1;33m!! \033[0m%s\n' "$*" >&2 || true; }
 
 # A line the GitHub runner turns into an annotation on the run. Only under the
-# forced command, where that is who is reading.
+# forced command or under `mesh deploy` (MESH_DEPLOY=1), where that is who is
+# reading. Neither passes arguments: both run this script bare, as by hand.
 annotate() {  # warning|error title message
-    if [[ -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+    if [[ -n "${SSH_ORIGINAL_COMMAND:-}" || "${MESH_DEPLOY:-}" = 1 ]]; then
         printf '::%s title=%s::%s\n' "$1" "$2" "$3" || true
     fi
 }
@@ -223,6 +232,7 @@ load_conf() {
     HEALTH_URLS="" HEALTH_HOST="" HEALTH_STATUS=200 HEALTH_TRIES=15
     LOCK_WAIT=300 SYSTEMCTL="sudo -n systemctl"
     UNIT_DIR=/etc/systemd/system CADDY_DIR=/etc/caddy/conf.d CADDY_MAIN=/etc/caddy/Caddyfile
+    MESH_REGISTER=auto MESH_TIMEOUT_S=1800 MESH_DIR="${MESH_DIR:-/etc/mesh}"
     unset -f before_restart after_restart health_check install_deps on_install
 
     if ! bash -n "$CONF"; then
@@ -255,6 +265,13 @@ load_conf() {
     for n in HEALTH_TRIES HEALTH_STATUS LOCK_WAIT; do
         [[ "${!n}" =~ ^[0-9]+$ ]] || { warn "$n in $CONF must be a number (it is '${!n}')."; return 1; }
     done
+    case "$MESH_REGISTER" in
+        auto|yes|no) ;;
+        *) warn "MESH_REGISTER in $CONF must be auto, yes or no (it is '$MESH_REGISTER')."; return 1 ;;
+    esac
+    if ! [[ "$MESH_TIMEOUT_S" =~ ^[0-9]+$ ]] || (( MESH_TIMEOUT_S < 10 || MESH_TIMEOUT_S > 21600 )); then
+        warn "MESH_TIMEOUT_S in $CONF must be a number from 10 to 21600 (it is '$MESH_TIMEOUT_S')."; return 1
+    fi
     PATH="${EXTRA_PATH:+$EXTRA_PATH:}$BASE_PATH"
     read -r -a SYSTEMCTL_CMD <<<"$SYSTEMCTL"
     VENV="$PREFIX/env"
@@ -265,7 +282,8 @@ print_config() {
     local key hook
     for key in NAME SERVICE_USER PREFIX BRANCH STATE_DIR STACK DEPS_FILES PYTHON PY_CHECK \
                SERVICES OPTIONAL_SERVICES PORT SITE WRITABLE_DIRS ENV_FILE EXTRA_PATH HEALTH_URLS HEALTH_HOST \
-               HEALTH_STATUS HEALTH_TRIES LOCK_WAIT SYSTEMCTL UNIT_DIR CADDY_DIR CADDY_MAIN; do
+               HEALTH_STATUS HEALTH_TRIES LOCK_WAIT SYSTEMCTL UNIT_DIR CADDY_DIR CADDY_MAIN \
+               MESH_REGISTER MESH_TIMEOUT_S MESH_DIR; do
         printf '%s=%q\n' "$key" "${!key}"
     done
     for hook in before_restart after_restart health_check install_deps on_install; do
